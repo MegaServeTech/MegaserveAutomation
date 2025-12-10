@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from collections import deque
-import io
+from openpyxl import Workbook
+import io, time, uuid
 import time
 import uuid
 
@@ -310,12 +311,21 @@ def run():
         "Noren Realized PNL Only",
         "Morning Position Verification"  # NEW TAB
     ])
-
     with tabs[0]:
         # Input Section
         with st.container():
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.subheader("📁 Upload Files")
+            st.subheader("Upload Files")
+            # NEW: Summary Excel uploader (must be above col1/col2 to be global)
+            uploaded_summary = st.file_uploader(
+                "Summary Excel (sheet: Users)",
+                type=["xlsx"],
+                help="Upload this ONLY if User Setting CSV is NOT uploaded",
+                key="summary"
+            )
+            if uploaded_summary:
+                st.success("Summary Excel uploaded")
+
             col1, col2 = st.columns(2)
             with col1:
                 uploaded_usersetting = st.file_uploader(
@@ -325,7 +335,8 @@ def run():
                     key="usersetting"
                 )
                 if uploaded_usersetting:
-                    st.success("✅ User Settings uploaded")
+                    st.success("User Settings uploaded")
+
                 uploaded_position = st.file_uploader(
                     "Position CSV", 
                     type="csv", 
@@ -333,7 +344,7 @@ def run():
                     key="position"
                 )
                 if uploaded_position:
-                    st.success("✅ Position uploaded")
+                    st.success("Position uploaded")
             
             with col2:
                 uploaded_orderbook = st.file_uploader(
@@ -343,7 +354,7 @@ def run():
                     key="orderbook"
                 )
                 if uploaded_orderbook:
-                    st.success("✅ Order Book uploaded")
+                    st.success("Order Book uploaded")
                 uploaded_bhav = st.file_uploader(
                     "Bhavcopy CSV", 
                     type="csv", 
@@ -351,13 +362,13 @@ def run():
                     key="bhavcopy"
                 )
                 if uploaded_bhav:
-                    st.success("✅ Bhavcopy uploaded")
+                    st.success("Bhavcopy uploaded")
             st.markdown('</div>', unsafe_allow_html=True)
 
         # Configuration Section
         with st.container():
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
-            st.subheader("🎛️ Configuration")
+            st.subheader("Configuration")
             col3, col4 = st.columns(2)
             with col3:
                 symbol = st.selectbox("Select Index", ["NIFTY", "SENSEX"], index=0, key="symbol")
@@ -366,59 +377,93 @@ def run():
             st.markdown('</div>', unsafe_allow_html=True)
 
         # Calculate Button
-        if st.button("🚀 Calculate PNL", use_container_width=True, key="calculate_pnl"):
-            if all([uploaded_usersetting, uploaded_orderbook, uploaded_position, uploaded_bhav]):
-                with st.spinner("🔄 Processing your data... This may take a moment for large files."):
+        if st.button("Calculate PNL", use_container_width=True, key="calculate_pnl"):
+            if (uploaded_usersetting or uploaded_summary) and uploaded_orderbook and uploaded_position and uploaded_bhav:
+                with st.spinner("Processing your data... This may take a moment for large files."):
                     try:
-                        # Read uploaded files safely with try-except
-                        try:
-                            df1 = pd.read_csv(uploaded_usersetting, skiprows=6)
-                        except Exception as e:
-                            st.error(f"❌ Error reading User Settings CSV: {str(e)}")
-                            return
+                        # Read uploaded files safely
+                        # ---------- Load User Settings OR Summary ----------
+                        using_summary_file = False
+
+                        # CASE 1 → User Settings CSV uploaded
+                        if uploaded_usersetting:
+                            try:
+                                df1 = pd.read_csv(uploaded_usersetting, skiprows=6)
+                                using_summary_file = False
+                                st.info("Loaded: User Settings CSV")
+                            except Exception as e:
+                                st.error(f"Error reading User Settings CSV: {e}")
+                                return
+
+                        # CASE 2 → Summary Excel uploaded instead
+                        else:
+                            if uploaded_summary is None:
+                                st.error("Please upload either User Setting CSV OR Summary Excel.")
+                                return
+
+                            try:
+                                df_summary = pd.read_excel(uploaded_summary, sheet_name="Users")
+                                using_summary_file = True
+                                st.info("Loaded: Summary Excel (Users sheet)")
+
+                                # RENAME columns to match original USERS SETTING structure
+                                df1 = df_summary.rename(columns={
+                                    "UserID": "User ID",
+                                    "Alias": "User Alias",
+                                    "ALLOCATION": "Telegram ID(s)"
+                                })
+
+                                # Ensure Max Loss column exists
+                                if "Max Loss" not in df1.columns:
+                                    df1["Max Loss"] = 0
+
+                            except Exception as e:
+                                st.error(f"Error reading Summary Excel: {e}")
+                                return
+
                         try:
                             df2 = pd.read_csv(uploaded_orderbook, index_col=False)
                         except Exception as e:
-                            st.error(f"❌ Error reading Order Book CSV: {str(e)}")
+                            st.error(f"Error reading Order Book CSV: {str(e)}")
                             return
                         try:
                             df3 = pd.read_csv(uploaded_position)
                         except Exception as e:
-                            st.error(f"❌ Error reading Position CSV: {str(e)}")
+                            st.error(f"Error reading Position CSV: {str(e)}")
                             return
                         try:
                             df_bhav = pd.read_csv(uploaded_bhav)
                         except Exception as e:
-                            st.error(f"❌ Error reading Bhavcopy CSV: {str(e)}")
+                            st.error(f"Error reading Bhavcopy CSV: {str(e)}")
                             return
 
                         # Check required columns in df1 (User Settings)
                         required_df1_cols = ["User ID", "Broker"]
                         missing_df1_cols = [col for col in required_df1_cols if col not in df1.columns]
                         if missing_df1_cols:
-                            st.error(f"❌ Missing columns in User Settings CSV: {', '.join(missing_df1_cols)}")
+                            st.error(f"Missing columns in User Settings CSV: {', '.join(missing_df1_cols)}")
                             return
 
-                        # Ensure Max Loss column exists in df1
+                        # Ensure Max Loss column exists
                         if "Max Loss" not in df1.columns:
-                            df1["Max Loss"] = 0  # Initialize with integer zeros
+                            df1["Max Loss"] = 0
 
                         # Validate inputs
                         expiry_str = expiry.strftime("%d-%m-%Y")
                         if symbol not in ["NIFTY", "SENSEX"]:
-                            st.error("❌ Invalid symbol. Please select 'NIFTY' or 'SENSEX'.")
+                            st.error("Invalid symbol. Please select 'NIFTY' or 'SENSEX'.")
                             return
                         try:
                             pd.to_datetime(expiry_str, format="%d-%m-%Y")
                         except ValueError:
-                            st.error("❌ Invalid expiry date format. Use DD-MM-YYYY.")
+                            st.error("Invalid expiry date format. Use DD-MM-YYYY.")
                             return
 
                         # Process Symbol in df3 (Position)
                         if "Symbol" not in df3.columns:
-                            st.error("❌ Missing 'Symbol' column in Position CSV.")
+                            st.error("Missing 'Symbol' column in Position CSV.")
                             return
-                        df3["Original_Symbol"] = df3["Symbol"]  # Preserve original Symbol
+                        df3["Original_Symbol"] = df3["Symbol"]
                         df3["Symbol"] = df3["Symbol"].astype(str).str[-5:]+df3["Symbol"].astype(str).str[-8:-6]
 
                         # Split users
@@ -433,7 +478,7 @@ def run():
                             required_bhav_cols = ["CONTRACT_D", "SETTLEMENT"]
                             missing_bhav_cols = [col for col in required_bhav_cols if col not in df_bhav.columns]
                             if missing_bhav_cols:
-                                st.error(f"❌ Missing columns in Bhavcopy CSV for NIFTY: {', '.join(missing_bhav_cols)}")
+                                st.error(f"Missing columns in Bhavcopy CSV for NIFTY: {', '.join(missing_bhav_cols)}")
                                 return
                             df_bhav["Date"] = df_bhav["CONTRACT_D"].str.extract(r'(\d{2}-[A-Z]{3}-\d{4})')
                             df_bhav["Bhav_Symbol"] = df_bhav["CONTRACT_D"].str.extract(r'^(.*?)(\d{2}-[A-Z]{3}-\d{4})')[0]
@@ -446,14 +491,13 @@ def run():
                             df3_not = df3_not.merge(df_bhav[["Bhav_Symbol", "Strike_Type", "SETTLEMENT"]], left_on="Strike_Type", right_on="Strike_Type", how="left")
                             settelment = "SETTLEMENT"
                             symbols = "Bhav_Symbol"
-                            # Prepare Strike Price Details for NIFTY
                             df_strike_details = df_bhav[["Strike_Type", "SETTLEMENT"]].copy()
                             df_strike_details = df_strike_details.rename(columns={"Strike_Type": "Strike Price", "SETTLEMENT": "Settlement Price"})
                         elif symbol=="SENSEX":
                             required_bhav_cols = ["Market Summary Date", "Expiry Date", "Series Code", "Close Price"]
                             missing_bhav_cols = [col for col in required_bhav_cols if col not in df_bhav.columns]
                             if missing_bhav_cols:
-                                st.error(f"❌ Missing columns in Bhavcopy CSV for SENSEX: {', '.join(missing_bhav_cols)}")
+                                st.error(f"Missing columns in Bhavcopy CSV for SENSEX: {', '.join(missing_bhav_cols)}")
                                 return
                             df_bhav["Date"] = pd.to_datetime(df_bhav["Market Summary Date"], format="%d %b %Y", errors="coerce")
                             df_bhav["Expiry Date"] = pd.to_datetime(df_bhav["Expiry Date"], format="%d %b %Y", errors="coerce")
@@ -464,19 +508,15 @@ def run():
                             df3_not["Close Price"] = df3_not["Symbol"].map(bhav_mapping)
                             settelment = "Close Price"
                             symbols = "Symbols"
-                            # Prepare Strike Price Details for SENSEX
                             df_strike_details = df_bhav[["Symbols", "Close Price"]].copy()
                             df_strike_details = df_strike_details.rename(columns={"Symbols": "Strike Price", "Close Price": "Settlement Price"})
 
-                        # Remove duplicates and sort Strike Price Details
                         df_strike_details = df_strike_details.drop_duplicates(subset=["Strike Price"]).sort_values(by="Strike Price")
                         df_strike_details = df_strike_details[["Strike Price", "Settlement Price"]]
 
-                        # Check for NaT in df_bhav dates
                         if df_bhav["Date"].isna().any():
-                            st.warning("⚠️ Some dates in Bhavcopy could not be parsed and have been set to NaT.")
+                            st.warning("Some dates in Bhavcopy could not be parsed and have been set to NaT.")
 
-                        # Extract Strike Name for df3_not from Original_Symbol
                         df3_not["Strike_Name"] = df3_not["Original_Symbol"].str.extract(r'(\d+[A-Z]{2})$')
 
                         # Not Noren Calculation
@@ -484,7 +524,7 @@ def run():
                         required_df3_cols = ["UserID", "Net Qty", "Sell Avg Price", "Buy Avg Price", "Sell Qty", "Buy Qty", "Realized Profit", "Unrealized Profit"]
                         missing_df3_cols = [col for col in required_df3_cols if col not in df3_not.columns]
                         if missing_df3_cols:
-                            st.error(f"❌ Missing columns in Position CSV for Non-Noren: {', '.join(missing_df3_cols)}")
+                            st.error(f"Missing columns in Position CSV for Non-Noren: {', '.join(missing_df3_cols)}")
                             return
                         dict2 = {}
                         dict3 = {}
@@ -523,7 +563,7 @@ def run():
                         required_df2_cols = ["Exchange", "Symbol", "Exchange Time", "User ID", "Quantity", "Avg Price", "Transaction", "Status"]
                         missing_df2_cols = [col for col in required_df2_cols if col not in df2.columns]
                         if missing_df2_cols:
-                            st.error(f"❌ Missing columns in Order Book CSV: {', '.join(missing_df2_cols)}")
+                            st.error(f"Missing columns in Order Book CSV: {', '.join(missing_df2_cols)}")
                             return
                         dict1 = {}
                         dict4 = {}
@@ -536,14 +576,13 @@ def run():
                         elif symbol == "SENSEX":
                             df2 = df2[(df2["Status"] == "COMPLETE")]
 
-                        # Preprocess df2
                         df2["Symbol"] = df2["Symbol"].astype(str).str[-7:]
                         df2["Strike_Name"] = df2["Symbol"]
                         df2["Exchange Time"] = df2["Exchange Time"].replace("01-Jan-0001 00:00:00", pd.NA)
                         df2["Exchange Time"] = pd.to_datetime(df2["Exchange Time"], format="%d-%b-%Y %H:%M:%S", errors="coerce")
                         nat_count = df2["Exchange Time"].isna().sum()
                         if nat_count > 0:
-                            st.warning(f"⚠️ Found {nat_count} invalid or unparsable dates in Exchange Time column. These rows have been excluded from calculations.")
+                            st.warning(f"Found {nat_count} invalid or unparsable dates in Exchange Time column. These rows have been excluded from calculations.")
                             st.dataframe(df2[df2["Exchange Time"].isna()][["Exchange Time", "User ID", "Symbol"]])
                         df2 = df2.dropna(subset=["Exchange Time"]).sort_values(by="Exchange Time")
 
@@ -598,7 +637,7 @@ def run():
                                     for i in range(len(test_df)):
                                         if txn[i] == "SELL":
                                             sell_q.append([i, remain[i], price[i]])
-                                        else:  # BUY
+                                        else:
                                             need = remain[i]
                                             total_matched = 0
                                             matched_indices = []
@@ -630,7 +669,7 @@ def run():
                                     for i in range(len(test_df)):
                                         if txn[i] == "BUY":
                                             buy_q.append([i, remain[i], price[i]])
-                                        else:  # SELL
+                                        else:
                                             need = remain[i]
                                             total_matched = 0
                                             matched_indices = []
@@ -672,28 +711,30 @@ def run():
                             x_df = pd.concat([x_df, new_df], ignore_index=True)
                             carry_fwd_pos_df_nfo["Value"] = carry_fwd_pos_df_nfo["Avg Price"] * carry_fwd_pos_df_nfo["Quantity"]
                             df_grouped = (
-                                carry_fwd_pos_df_nfo.groupby("Symbol")
-                                .apply(lambda x: pd.Series({
-                                    "Total_Quantity": x["Quantity"].sum(),
-                                    "Weighted_Avg_Price": (x["Avg Price"] * x["Quantity"]).sum() / x["Quantity"].sum()
-                                    if x["Quantity"].sum() != 0 else 0,
-                                    "Strike_Name": x["Strike_Name"].iloc[0]  # Add Strike_Name
-                                }))
-                                .reset_index()
+                                carry_fwd_pos_df_nfo
+                                .groupby("Symbol", as_index=False)
+                                .agg(
+                                    Total_Quantity=("Net_Quantity", "sum"),
+                                    Weighted_Avg_Price=("Avg Price", lambda x: (x * carry_fwd_pos_df_nfo.loc[x.index, "Quantity"]).sum() / carry_fwd_pos_df_nfo.loc[x.index, "Quantity"].sum() if carry_fwd_pos_df_nfo.loc[x.index, "Quantity"].sum() != 0 else 0),
+                                    Strike_Name=("Symbol", "first")
+                                )
                             )
-                            fil_name = f"carry_fwd_pos_df_{noren_user[m]}.csv"
-                            carry_fwd_pos_df_nfo.to_csv(fil_name)
+
                             df_grouped["User ID"] = noren_user[m]
-                            df_grouped["Calculated_Realized_PNL"] = total_realized_pnl  # Add total realized PNL for the user
+                            df_grouped["Calculated_Realized_PNL"] = total_realized_pnl
                             df_final = pd.concat([df_final, df_grouped], ignore_index=True)
                             dict1[noren_user[m]] = total_realized_pnl
                             if user_detailed:
                                 df_detailed = pd.concat([df_detailed] + user_detailed, ignore_index=True)
 
-                        # Calculate Unrealized PNL for Noren Users
-                        df_final[settelment] = df_final['Symbol'].map(
-                            df_bhav.set_index('Strike_Type' if symbol == "NIFTY" else 'Symbols')[settelment]
+                        # === FIXED: Safe mapping with deduplicated keys ===
+                        mapping_col = 'Strike_Type' if symbol == "NIFTY" else 'Symbols'
+                        mapping_series = (
+                            df_bhav.drop_duplicates(subset=[mapping_col])
+                                  .set_index(mapping_col)[settelment]
                         )
+                        df_final[settelment] = df_final['Symbol'].map(mapping_series)
+
                         df_final["Calculated_Unrealized_PNL"] = np.select(
                             [
                                 df_final["Total_Quantity"] > 0,
@@ -705,7 +746,8 @@ def run():
                             ],
                             default=0
                         )
-                        # Initialize missing columns in df_final
+
+                        # Initialize missing columns
                         for col in ["Sell Avg Price", "Sell Qty", "Buy Qty", "Realized Profit", "Unrealized Profit", "Matching_Realized", "Matching_Unrealized"]:
                             if col not in df_final:
                                 df_final[col] = np.nan
@@ -721,13 +763,13 @@ def run():
                         dict2_fmt = {k: f"{v:.2f}" for k, v in dict2.items()}
                         dict3_fmt = {k: f"{v:.2f}" for k, v in dict3.items()}
 
-                        # Convert dictionaries to DataFrames for Excel export
+                        # Convert to DataFrames
                         df_dict1 = pd.DataFrame(list(dict1.items()), columns=['User ID', 'Realized PNL'])
                         df_dict2 = pd.DataFrame(list(dict2.items()), columns=['User ID', 'Realized PNL'])
                         df_dict3 = pd.DataFrame(list(dict3.items()), columns=['User ID', 'Unrealized PNL'])
                         df_dict4 = pd.DataFrame(list(dict4.items()), columns=['User ID', 'Unrealized PNL'])
 
-                        # Prepare data for metrics
+                        # Prepare display
                         rows = []
                         for user in sorted(dict1_fmt.keys()):
                             rows.append({
@@ -743,7 +785,7 @@ def run():
                             })
                         df_display = pd.DataFrame(rows)
 
-                        # Prepare detailed position DataFrame for Excel
+                        # Prepare detailed position
                         df3_not["Net settlement value"] = np.nan
                         positive_mask = df3_not["Net Qty"] > 0
                         negative_mask = df3_not["Net Qty"] < 0
@@ -751,17 +793,11 @@ def run():
                         df3_not.loc[negative_mask, "Net settlement value"] = (df3_not.loc[negative_mask, "Sell Avg Price"] - df3_not.loc[negative_mask, settelment]) * abs(df3_not.loc[negative_mask, "Net Qty"])
                         df3_not["Calculated PNL"] = df3_not["Calculated_Realized_PNL"] + df3_not["Calculated_Unrealized_PNL"]
 
-                        # Ensure all required columns are present
                         required_columns = ["UserID", "Original_Symbol", "Strike_Name", "Net Qty", "Sell Avg Price", "Buy Avg Price", "Sell Qty", "Buy Qty", "Realized Profit", "Unrealized Profit", settelment, "Calculated_Realized_PNL", "Calculated_Unrealized_PNL", "Net settlement value", "Calculated PNL"]
-                        missing_cols = [col for col in required_columns if col not in df3_not.columns]
-                        if missing_cols:
-                            for col in missing_cols:
-                                if col not in [settelment, "Calculated_Realized_PNL", "Calculated_Unrealized_PNL", "Net settlement value", "Calculated PNL", "Strike_Name"]:
-                                    st.error(f"❌ Missing column in df3_not: {col}")
-                                    return
+                        for col in required_columns:
+                            if col not in df3_not.columns:
                                 df3_not[col] = np.nan
 
-                        # For Noren users, merge with df_final
                         if not df_final.empty:
                             df_position_detailed = pd.concat([
                                 df3_not[["UserID", "Original_Symbol", "Strike_Name", "Net Qty", "Sell Avg Price", "Buy Avg Price", "Sell Qty", "Buy Qty", "Realized Profit", "Unrealized Profit", settelment, "Calculated_Realized_PNL", "Calculated_Unrealized_PNL", "Net settlement value", "Calculated PNL"]].rename(columns={"Original_Symbol": "Symbol"}),
@@ -770,66 +806,55 @@ def run():
                         else:
                             df_position_detailed = df3_not[["UserID", "Original_Symbol", "Strike_Name", "Net Qty", "Sell Avg Price", "Buy Avg Price", "Sell Qty", "Buy Qty", "Realized Profit", "Unrealized Profit", settelment, "Calculated_Realized_PNL", "Calculated_Unrealized_PNL", "Net settlement value", "Calculated PNL"]].rename(columns={"Original_Symbol": "Symbol"})
 
-                        # Prepare Pivot from df_position_detailed
                         df_pivot = df_position_detailed.groupby("UserID")["Net settlement value"].sum().reset_index()
-                        df_pivot.columns = ["Row Labels", "Sum of Net settlement value"]
-                        grand_total = pd.DataFrame({"Row Labels": ["Grand Total"], "Sum of Net settlement value": [df_pivot["Sum of Net settlement value"].sum()]})
+                        df_pivot.columns = ["UserID", "Sum of settlement value"]
+                        grand_total = pd.DataFrame({"UserID": ["Grand Total"], "Sum of settlement value": [df_pivot["Sum of settlement value"].sum()]})
                         df_pivot = pd.concat([df_pivot, grand_total], ignore_index=True)
 
-                        # Update Max Loss in usersetting df (df1) and create df_maxloss
+                        # Max Loss Calculation
                         telegram_col = "Telegram ID(s)"
+                        alias_col="User Alias"
                         if telegram_col not in df1.columns:
-                            st.warning(f"⚠️ '{telegram_col}' column not found in User Settings CSV. Max Loss calculation skipped.")
+                            st.warning(f"'{telegram_col}' column not found in User Settings CSV. Max Loss calculation skipped.")
                         else:
                             maxloss_rows = []
-                            # Combine all PNL data into a single DataFrame for easier mapping
                             df_pnl_combined = pd.DataFrame()
-                            
-                            # Add Noren users' PNL
                             if not df_dict1.empty:
                                 df_pnl_combined = pd.concat([df_pnl_combined, df_dict1.rename(columns={'Realized PNL': 'Noren_Realized_PNL'})], ignore_index=True)
                             if not df_dict4.empty:
                                 df_pnl_combined = df_pnl_combined.merge(df_dict4.rename(columns={'Unrealized PNL': 'Noren_Unrealized_PNL'}), on='User ID', how='outer')
-                            
-                            # Add Non-Noren users' PNL
                             if not df_dict2.empty:
                                 df_pnl_combined = df_pnl_combined.merge(df_dict2.rename(columns={'Realized PNL': 'Not_Noren_Realized_PNL'}), on='User ID', how='outer')
                             if not df_dict3.empty:
                                 df_pnl_combined = df_pnl_combined.merge(df_dict3.rename(columns={'Unrealized PNL': 'Not_Noren_Unrealized_PNL'}), on='User ID', how='outer')
-                            
-                            # Add Pivot data
                             if not df_pivot.empty:
-                                df_pnl_combined = df_pnl_combined.merge(df_pivot[['Row Labels', 'Sum of Net settlement value']].rename(columns={'Row Labels': 'User ID'}), on='User ID', how='outer')
-                            
-                            # Process all users from df1
+                                df_pnl_combined = df_pnl_combined.merge(df_pivot[['UserID', 'Sum of settlement value']].rename(columns={'UserID': 'User ID'}), on='User ID', how='outer')
+                            # if not df1.empty:
+                            #     df_pnl_combined = df_pnl_combined.merge(df1[['User ID', 'User Alias']], on='User ID',how='left')
+
                             for user in df1["User ID"]:
                                 telegram_id = df1.loc[df1["User ID"] == user, telegram_col].iloc[0] if not df1.loc[df1["User ID"] == user, telegram_col].empty else 0
+                                user_alias = df1.loc[df1["User ID"] == user, alias_col].iloc[0] if not df1.loc[df1["User ID"] == user, alias_col].empty else 0
                                 user_type = "Noren" if user in noren_user else "Non-Noren"
-                                
-                                # Initialize PNL values
                                 realized_pnl = 0.0
                                 unrealized_pnl = 0.0
                                 net_settlement = 0.0
-                                
-                                # Fetch PNL based on user type
+
                                 if user_type == "Noren" and user in df_pnl_combined['User ID'].values:
                                     realized_pnl = df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Noren_Realized_PNL'].iloc[0] if pd.notna(df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Noren_Realized_PNL']).any() else 0.0
                                     unrealized_pnl = df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Noren_Unrealized_PNL'].iloc[0] if pd.notna(df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Noren_Unrealized_PNL']).any() else 0.0
                                 elif user_type == "Non-Noren" and user in df_pnl_combined['User ID'].values:
                                     realized_pnl = df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Not_Noren_Realized_PNL'].iloc[0] if pd.notna(df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Not_Noren_Realized_PNL']).any() else 0.0
                                     unrealized_pnl = df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Not_Noren_Unrealized_PNL'].iloc[0] if pd.notna(df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Not_Noren_Unrealized_PNL']).any() else 0.0
-                                
-                                # Fetch Net Settlement Value
+
                                 if user in df_pnl_combined['User ID'].values:
-                                    net_settlement = df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Sum of Net settlement value'].iloc[0] if pd.notna(df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Sum of Net settlement value']).any() else 0.0
-                                
-                                # Calculate Max Loss
+                                    net_settlement = df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Sum of settlement value'].iloc[0] if pd.notna(df_pnl_combined.loc[df_pnl_combined['User ID'] == user, 'Sum of settlement value']).any() else 0.0
+
                                 max_loss = (telegram_id * 0.7) + realized_pnl + (unrealized_pnl if user_type == "Non-Noren" else 0)
                                 df1.loc[df1["User ID"] == user, "Max Loss"] = int(max_loss)
-                                
-                                # Append to maxloss_rows
                                 maxloss_rows.append({
                                     "User ID": user,
+                                    "User Alias": user_alias,
                                     "User Type": user_type,
                                     "Telegram ID": telegram_id,
                                     "Realized PNL": realized_pnl,
@@ -838,21 +863,22 @@ def run():
                                     "Max Loss": int(max_loss)
                                 })
 
-                            # Create df_maxloss
                             df_maxloss = pd.DataFrame(maxloss_rows)
-                            
-                            # Calculate metrics
+
                             total_realized = df_display["REALIZED_PNL"].sum()
                             total_unrealized = df_display["UNREALIZED_PNL"].sum()
                             total_pnl = total_realized + total_unrealized
                             num_users = len(df_display)
 
-                            # Prepare download files
-                            output = io.StringIO()
-                            output.write(comment_lines)
-                            df1["Max Loss"] = df1["Max Loss"].astype(int)
-                            df1.to_csv(output, index=False)
-                            updated_usersetting_csv = output.getvalue().encode('utf-8')
+                            # ---------- Generate Updated UserSetting CSV (only if NOT using summary) ----------
+                            if not using_summary_file:
+                                output = io.StringIO()
+                                output.write(comment_lines)
+                                df1["Max Loss"] = df1["Max Loss"].astype(int)
+                                df1.to_csv(output, index=False)
+                                updated_usersetting_csv = output.getvalue().encode('utf-8')
+                            else:
+                                updated_usersetting_csv = None
 
                             output_additional_excel = io.BytesIO()
                             with pd.ExcelWriter(output_additional_excel, engine='xlsxwriter') as writer:
@@ -865,8 +891,145 @@ def run():
                                 df_strike_details.to_excel(writer, sheet_name="Strike Price Details", index=False)
                                 df_dict1.to_excel(writer, sheet_name="Dict1 Realized PNL", index=False)
                             output_additional_excel.seek(0)
+                            
+                            # MAX LOSS CALCULATION REPORT FOR A8
+                            
+                            # === CORRECTED: Use df_final (aggregated carry-forward) for Net Qty & Price ===
+                            df_1_data = df_final.copy()  # ← This has Total_Quantity and Weighted_Avg_Price
+                            df_2_data = not_noren_data_pos.copy()  # Already correct
+                            df3_data = pd.DataFrame(columns=df_2_data.columns)
 
-                            # Store results in session state
+                            # Map from aggregated data
+                            df3_data["Symbol"] = df_1_data["Strike_Name"]
+                            df3_data["Net Qty"] = df_1_data["Total_Quantity"]  # ← Now exists!
+                            df3_data["Carry Fwd Qty"] = df_1_data["Total_Quantity"]
+                            df3_data["Unrealized Profit"] = df_1_data.get("Unrealized Profit", np.nan)
+                            df3_data["UserID"] = df_1_data["User ID"]
+                            df3_data["Close Price"] = df_1_data.get("SETTLEMENT", df_1_data.get("Close Price"))
+                            df3_data["Calculated_Unrealized_PNL"] = df_1_data["Calculated_Unrealized_PNL"]
+                            df3_data["Weighted_Avg_Price"] = df_1_data["Weighted_Avg_Price"]
+                            df3_data["Original_Symbol"] = df_1_data["Strike_Name"]
+                            df3_data["Buy Avg Price"] = df_1_data["Weighted_Avg_Price"]
+
+                            # Buy/Sell Qty logic
+                            df3_data['Buy Qty'] = np.where(df3_data['Net Qty'] > 0, df3_data['Net Qty'], 0)
+                            df3_data['Sell Qty'] = np.where(df3_data['Net Qty'] < 0, abs(df3_data['Net Qty']), 0)
+
+                            # Avg prices
+                            df3_data['Buy Avg Price'] = np.where(df3_data['Net Qty'] > 0, df3_data['Weighted_Avg_Price'], np.nan)
+                            df3_data['Sell Avg Price'] = np.where(df3_data['Net Qty'] < 0, df3_data['Weighted_Avg_Price'], np.nan)
+                            df3_data["Sell Qty"] = -df3_data["Sell Qty"]  # Make sell qty negative?
+
+                            # Concatenate (though df_2_data is same as df_1_data — consider simplifying)
+                            df3_data = pd.concat([df_2_data, df3_data], ignore_index=True)
+
+                            # Replace blank strings in Buy/Sell values
+                            df3_data['Buy Value'].replace('', np.nan, inplace=True)
+                            df3_data['Sell Value'].replace('', np.nan, inplace=True)
+
+                            # Ensure SETTLEMENT column exists
+                            if 'SETTLEMENT' not in df3_data.columns:
+                                df3_data['SETTLEMENT'] = df3_data.get('Close Price')
+
+                            # Now safe to replace
+                            df3_data['SETTLEMENT'].replace('', np.nan, inplace=True)
+                            df3_data['SETTLEMENT'].fillna(df3_data.get('Close Price'), inplace=True)
+
+                            # Apply the formula only where Buy Value is NaN
+                            df3_data.loc[df3_data['Buy Value'].isna(), 'Buy Value'] = (
+                                df3_data['Buy Qty'] * df3_data['Buy Avg Price']
+                            )
+                            # Apply the formula only where Buy Value is NaN
+                            df3_data.loc[df3_data['Sell Value'].isna(), 'Sell Value'] = (
+                                df3_data['Sell Qty'] * df3_data['Sell Avg Price']
+                            )
+                            # Apply the formula only where Buy Value is NaN
+                            df3_data.loc[df3_data['SETTLEMENT'].isna(), 'SETTLEMENT'] = (
+                                df3_data['Close Price']
+                            )
+
+                            # Treat blank strings as NaN
+                            df3_data['Product'].replace('', np.nan, inplace=True)
+                            df3_data['Exchange'].replace('', np.nan, inplace=True)
+
+                            # 1️⃣ Replace blank (NaN) values in Product with 'NRML'
+                            df3_data['Product'].fillna('NRML', inplace=True)
+                            
+                            # Remove ONLY these exchanges
+                            remove_exchanges = ['NSE', 'BSE', 'MCX']
+
+                            df3_data = df3_data[~df3_data['Exchange'].isin(remove_exchanges)]
+
+                            # 2️⃣ Replace blank (NaN) values in Exchange with any non-blank value
+                            if df3_data['Exchange'].notna().any():  # only if there's at least one non-blank value
+                                first_valid_exchange = df3_data['Exchange'].dropna().iloc[0]
+                                df3_data['Exchange'].fillna(first_valid_exchange, inplace=True)
+
+                            # Drop duplicates and unnecessary columns
+                            df3_data = df3_data.drop(columns=["Close Price", "S.No.", "Carry Fwd Qty", "P&L", "Unrealized Profit", "Realized Profit","Weighted_Avg_Price", "Original_Symbol", "Strike_Name", "Calculated_Realized_PNL", "Strike_Type", "Bhav_Symbol"], errors="ignore")
+                            df_bhav["Date"] = pd.to_datetime(df_bhav["Date"])
+                            if "Bhav_Symbol" in df_bhav.columns:
+                                df_bhav.drop(columns=["Bhav_Symbol"], inplace=True)
+                            df3_data.loc[df3_data['Sell Qty'] == 0, ['Sell Value', 'Sell Avg Price']] = 0
+                            df3_data.loc[df3_data['Buy Qty'] == 0, ['Buy Value', 'Buy Avg Price']] = 0
+                            df3_data.rename(columns={'Calculated_Unrealized_PNL': 'Net Settlement Value'}, inplace=True)
+                            df3_data = df3_data.drop(columns="Net Settlement Value")
+                            df3_data.loc[df3_data["Sell Avg Price"].notna(), "Sell Avg Price"] = (
+                                df3_data.loc[df3_data["Sell Avg Price"].notna(), "Sell Avg Price"].round(2)
+                            )
+
+                            df_final = df_final.drop(columns=["Symbol", "Sell Avg Price", "Sell Qty", "Buy Qty", "Unrealized Profit", "Realized Profit", "Matching_Realized", "Matching_Unrealized"], errors="ignore")
+                            # ---- ALL SHEETS IN ONE FILE (max_loss_buf) ----
+                            max_loss_buf = io.BytesIO()
+
+                            # Use pandas ExcelWriter (xlsxwriter engine) – it can write many DataFrames + openpyxl formulas
+                            with pd.ExcelWriter(max_loss_buf, engine='xlsxwriter') as writer:
+
+                                # 1. Pivot
+                                df_pivot.to_excel(writer, sheet_name="Pivot", index=False)
+                                # 2. Calculation (Max-Loss summary)
+                                df_maxloss.to_excel(writer, sheet_name="Calculation", index=False)
+                                # 3. Noren UnRealized Data
+                                df_final.to_excel(writer, sheet_name="Noren UnRealized Data", index=False)
+                                # 4. BhavCopy
+                                df_bhav.to_excel(writer, sheet_name="BhavCopy", index=False)
+                                # 5. VS1 A8 Pos(Calc) – with **live Excel formula**
+                                # First write the data using pandas
+                                df3_data.to_excel(writer, sheet_name="VS1 A8 Pos(Calc)", index=False)
+
+                                # Now get the xlsxwriter worksheet object to inject formulas
+                                workbook  = writer.book
+                                ws_calc   = writer.sheets["VS1 A8 Pos(Calc)"]
+
+                                # ---- Add formula column ----
+                                formula_col_idx = len(df3_data.columns) + 1  # 1-based
+                                ws_calc.write(0, formula_col_idx - 1, "Calculated PNL")  # header (row 0 = Excel row 1)
+
+                                # Helper: convert column index → Excel letter (A, B, ..., Z, AA, ...)
+                                import string
+                                def col_to_letter(idx):  # 1-based
+                                    return ''.join(
+                                        string.ascii_uppercase[(idx-1) // 26 - i] if (idx-1) // (26**(i+1)) else string.ascii_uppercase[(idx-1) % 26]
+                                        for i in range(2)
+                                        if (idx-1) // (26**(i+1))
+                                    ) or string.ascii_uppercase[(idx-1) % 26]
+
+                                # Column letters (1-based)
+                                E = col_to_letter(df3_data.columns.get_loc("Net Qty") + 1)
+                                G = col_to_letter(df3_data.columns.get_loc("Buy Avg Price") + 1)
+                                J = col_to_letter(df3_data.columns.get_loc("Sell Avg Price") + 1)
+                                Q = col_to_letter(df3_data.columns.get_loc("SETTLEMENT") + 1)
+
+                                # Write formula in each row (from row 2 onward)
+                                for r in range(2, len(df3_data) + 2):
+                                    formula = f"=IF({E}{r}>0,({Q}{r}-{G}{r})*ABS({E}{r}),({J}{r}-{Q}{r})*ABS({E}{r}))"
+                                    ws_calc.write_formula(r-1, formula_col_idx - 1, formula)  # 0-based
+
+                            # Finalize
+                            max_loss_buf.seek(0)
+                            st.session_state.max_loss_calc_excel = max_loss_buf 
+                                                       
+                            # Store in session
                             st.session_state.calculation_done = True
                             st.session_state.df_display = df_display
                             st.session_state.df_maxloss = df_maxloss
@@ -878,20 +1041,20 @@ def run():
                             st.session_state.output_additional_excel = output_additional_excel
                             st.session_state.expiry_str = expiry_str
 
-                            st.success("✅ Calculation completed! Explore the insights below.")
+                            st.success("Calculation completed! Explore the insights below.")
 
                     except Exception as e:
-                        st.error(f"❌ An error occurred during calculation: {str(e)}")
+                        st.error(f"An error occurred during calculation: {str(e)}")
                         st.exception(e)
             else:
-                st.warning("⚠️ Please upload all four files to proceed. If uploads fail, ensure config.toml is set as per code comments.")
+                st.warning("Please upload all four files to proceed.")
 
-        # Display results if calculation is done
+        # Display results
         if st.session_state.calculation_done:
-            # Key Metrics Section
+            # Key Metrics
             with st.container():
                 st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.subheader("📊 Key Metrics")
+                st.subheader("Key Metrics")
                 st.markdown('<div class="metric-container">', unsafe_allow_html=True)
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -929,10 +1092,10 @@ def run():
                 st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            # Max Loss Summary Section
+            # Max Loss Summary
             with st.container():
                 st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.subheader("💰 Max Loss Summary")
+                st.subheader("Max Loss Summary")
                 st.dataframe(
                     st.session_state.df_maxloss.style.format({
                         "Telegram ID": "{:.2f}",
@@ -950,19 +1113,33 @@ def run():
                 st.markdown('</div>', unsafe_allow_html=True)
 
             # Download Section
+            # ──────────────────────────────────────────────────────────────────────
+            # Download Section (inside the first tab – after the two existing buttons)
+            # ──────────────────────────────────────────────────────────────────────
             with st.container():
                 st.markdown('<div class="section-card">', unsafe_allow_html=True)
-                st.subheader("💾 Download Results")
+                st.subheader("Download Results")
                 st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                col_download1, col_download2 = st.columns(2)  # Use columns for precise control
+
+                col_download1, col_download2, col_download3 = st.columns(3)   # <-- 3 columns now
+
                 with col_download1:
-                    st.download_button(
-                        label="Download Updated Usersetting CSV",
+                    if st.session_state.updated_usersetting_csv is not None:
+                        st.download_button(
+                            label="Download Updated Usersetting CSV",
+                            data=st.session_state.updated_usersetting_csv,
+                            file_name=f'updated_usersetting_{st.session_state.expiry_str}.csv',
+                            mime='text/csv',
+                            key="download_usersetting"
+                        )
+                    else:
+                        st.caption("Updated UserSetting CSV not available (Summary Excel was used)."),
                         data=st.session_state.updated_usersetting_csv,
                         file_name=f'updated_usersetting_{st.session_state.expiry_str}.csv',
                         mime='text/csv',
                         key="download_usersetting"
-                    )
+                    
+
                 with col_download2:
                     st.download_button(
                         label="Download Additional Data XLSX",
@@ -971,6 +1148,21 @@ def run():
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="download_additional_excel"
                     )
+
+                # ─────── NEW BUTTON ───────
+                with col_download3:
+                    if 'max_loss_calc_excel' in st.session_state:
+                        st.download_button(
+                            label="Download VS1 A8 Pos(Calc) XLSX",
+                            data=st.session_state.max_loss_calc_excel,
+                            file_name=f"VS1_A8_Pos_Calc_{st.session_state.expiry_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_max_loss_calc"
+                        )
+                    else:
+                        st.caption("Run the calculation first.")
+                # ─────── END NEW BUTTON ───────
+
                 st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 

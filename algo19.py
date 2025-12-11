@@ -292,7 +292,7 @@ def run():
             df_bfo["Calculated_Realized_PNL"] = np.select(cond_bfo, choice_bfo, default=0)
             total_realized_bfo = df_bfo["Calculated_Realized_PNL"].fillna(0).sum()
 
-            if include_settlement_nfo and nfo_bhav_file:
+            if include_settlement_nfo and nfo_bhav_file is not None and getattr(nfo_bhav_file, "size", 0) > 0:
                 df_bhav_nfo = pd.read_csv(nfo_bhav_file)
                 df_bhav_nfo["Date"] = df_bhav_nfo["CONTRACT_D"].str.extract(r'(\d{2}-[A-Z]{3}-\d{4})')
                 df_bhav_nfo["Symbol"] = df_bhav_nfo["CONTRACT_D"].str.extract(r'^(.*?)(\d{2}-[A-Z]{3}-\d{4})')[0]
@@ -309,7 +309,7 @@ def run():
                     default=0)
                 total_settlement_nfo = df_nfo["Calculated_Settlement_PNL"].fillna(0).sum()
 
-            if include_settlement_bfo and bfo_bhav_file:
+            if include_settlement_bfo and bfo_bhav_file is not None and getattr(bfo_bhav_file, "size", 0) > 0:
                 df_bhav_bfo = pd.read_csv(bfo_bhav_file)
                 df_bhav_bfo["Expiry Date"] = pd.to_datetime(df_bhav_bfo["Expiry Date"], format="%d %b %Y", errors="coerce")
                 df_bhav_bfo = df_bhav_bfo[df_bhav_bfo["Expiry Date"] == pd.to_datetime(expiry_bfo)]
@@ -511,6 +511,62 @@ def run():
                 else:
                     st.error("Please upload positions file and select a user.")
 
+        # ===================== NEW SECTION: ALL USERS SUMMARY =====================
+        if process_button and positions_file:
+            st.markdown("## All Users Realized & Settlement Summary")
+
+            # Ensure required files exist BEFORE processing
+            if (include_settlement_nfo and not nfo_bhav_file) or (include_settlement_bfo and not bfo_bhav_file):
+                st.warning("Upload both NFO & BFO bhavcopy files to generate full summary.")
+            else:
+                try:
+                    df_all = st.session_state.positions_df
+                    users = df_all['UserID'].unique()
+
+                    summary_rows = []
+
+                    for user in users:
+                        temp_df = df_all[df_all['UserID'] == user]
+
+                        results = process_data(
+                            temp_df,
+                            nfo_bhav_file if include_settlement_nfo else None,
+                            bfo_bhav_file if include_settlement_bfo else None,
+                            expiry_nfo,
+                            expiry_bfo,
+                            include_settlement_nfo,
+                            include_settlement_bfo
+                        )
+
+                        summary_rows.append({
+                            "UserID": user,
+                            "NFO Realized": results["total_realized_nfo"],
+                            "NFO Settlement": results["total_settlement_nfo"],
+                            "BFO Realized": results["total_realized_bfo"],
+                            "BFO Settlement": results["total_settlement_bfo"],
+                            "Total Realized": results["overall_realized"],
+                            "Total Settlement": results["overall_settlement"],
+                            "Grand Total": results["grand_total"]
+                        })
+
+                    summary_df = pd.DataFrame(summary_rows)
+                    st.dataframe(summary_df)
+
+                    # EXCEL DOWNLOAD
+                    output = BytesIO()
+                    filename = f"A19_Realized&settlement_PNL_{datetime.now().strftime('%Y%m%d')}.xlsx"
+
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        summary_df.to_excel(writer, index=False, sheet_name='Summary')
+
+                    b64 = base64.b64encode(output.getvalue()).decode()
+                    link = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">📥 Download All Users Summary Excel</a>'
+                    st.markdown(link, unsafe_allow_html=True)
+
+                except Exception as e:
+                    st.error(f"Error creating summary: {e}")
+
+
     # ===================== TAB 2: PORTFOLIO ANALYSIS =====================
     with tab2:
         st.markdown('<hr class="my-8 border-gray-300">', unsafe_allow_html=True)
@@ -542,5 +598,3 @@ def run():
 if __name__ == "__main__":
     st.write(f"DEBUG: Starting app at {datetime.now()}")
     run()
-
-

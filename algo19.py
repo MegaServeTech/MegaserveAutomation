@@ -292,7 +292,7 @@ def run():
             df_bfo["Calculated_Realized_PNL"] = np.select(cond_bfo, choice_bfo, default=0)
             total_realized_bfo = df_bfo["Calculated_Realized_PNL"].fillna(0).sum()
 
-            if include_settlement_nfo and nfo_bhav_file is not None and getattr(nfo_bhav_file, "size", 0) > 0:
+            if include_settlement_nfo and nfo_bhav_file:
                 df_bhav_nfo = pd.read_csv(nfo_bhav_file)
                 df_bhav_nfo["Date"] = df_bhav_nfo["CONTRACT_D"].str.extract(r'(\d{2}-[A-Z]{3}-\d{4})')
                 df_bhav_nfo["Symbol"] = df_bhav_nfo["CONTRACT_D"].str.extract(r'^(.*?)(\d{2}-[A-Z]{3}-\d{4})')[0]
@@ -309,7 +309,7 @@ def run():
                     default=0)
                 total_settlement_nfo = df_nfo["Calculated_Settlement_PNL"].fillna(0).sum()
 
-            if include_settlement_bfo and bfo_bhav_file is not None and getattr(bfo_bhav_file, "size", 0) > 0:
+            if include_settlement_bfo and bfo_bhav_file:
                 df_bhav_bfo = pd.read_csv(bfo_bhav_file)
                 df_bhav_bfo["Expiry Date"] = pd.to_datetime(df_bhav_bfo["Expiry Date"], format="%d %b %Y", errors="coerce")
                 df_bhav_bfo = df_bhav_bfo[df_bhav_bfo["Expiry Date"] == pd.to_datetime(expiry_bfo)]
@@ -511,48 +511,75 @@ def run():
                 else:
                     st.error("Please upload positions file and select a user.")
 
-        # ===================== NEW SECTION: ALL USERS SUMMARY =====================
+        # ===================== ALL USERS SUMMARY (B2: file-only, pointer resets) =====================
+        # This section runs ONLY after process_button click and only if positions_file exists
         if process_button and positions_file:
+            st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown("## All Users Realized & Settlement Summary")
 
-            # Ensure required files exist BEFORE processing
-            if (include_settlement_nfo and not nfo_bhav_file) or (include_settlement_bfo and not bfo_bhav_file):
-                st.warning("Upload both NFO & BFO bhavcopy files to generate full summary.")
+            df_all = st.session_state.positions_df
+
+            # Make sure UserID exists
+            if 'UserID' not in df_all.columns:
+                st.error("'UserID' column missing in positions file — cannot build summary.")
             else:
-                try:
-                    df_all = st.session_state.positions_df
-                    users = df_all['UserID'].unique()
+                users = df_all['UserID'].unique()
+                summary_rows = []
 
-                    summary_rows = []
-
+                # Check bhavcopy requirements BEFORE looping
+                if include_settlement_nfo and not nfo_bhav_file:
+                    st.error("NFO settlement is enabled but NFO Bhavcopy file was not uploaded.")
+                elif include_settlement_bfo and not bfo_bhav_file:
+                    st.error("BFO settlement is enabled but BFO Bhavcopy file was not uploaded.")
+                else:
                     for user in users:
-                        temp_df = df_all[df_all['UserID'] == user]
+                        temp_df = df_all[df_all["UserID"] == user].copy()
 
-                        results = process_data(
-                            temp_df,
-                            nfo_bhav_file if include_settlement_nfo else None,
-                            bfo_bhav_file if include_settlement_bfo else None,
-                            expiry_nfo,
-                            expiry_bfo,
-                            include_settlement_nfo,
-                            include_settlement_bfo
-                        )
+                        # RESET pointer before EACH read (critical for B2)
+                        try:
+                            if include_settlement_nfo and nfo_bhav_file:
+                                nfo_bhav_file.seek(0)
+                        except Exception:
+                            pass
+
+                        try:
+                            if include_settlement_bfo and bfo_bhav_file:
+                                bfo_bhav_file.seek(0)
+                        except Exception:
+                            pass
+
+                        # Now safely call process_data()
+                        try:
+                            results = process_data(
+                                temp_df,
+                                nfo_bhav_file if include_settlement_nfo else None,
+                                bfo_bhav_file if include_settlement_bfo else None,
+                                expiry_nfo,
+                                expiry_bfo,
+                                include_settlement_nfo,
+                                include_settlement_bfo
+                            )
+                        except Exception as e:
+                            st.error(f"Error while calculating summary for user {user}: {e}")
+                            # continue to next user (don't break entire summary)
+                            continue
 
                         summary_rows.append({
                             "UserID": user,
-                            "NFO Realized": results["total_realized_nfo"],
-                            "NFO Settlement": results["total_settlement_nfo"],
-                            "BFO Realized": results["total_realized_bfo"],
-                            "BFO Settlement": results["total_settlement_bfo"],
-                            "Total Realized": results["overall_realized"],
-                            "Total Settlement": results["overall_settlement"],
-                            "Grand Total": results["grand_total"]
+                            "NFO Realized": results.get("total_realized_nfo", 0),
+                            "NFO Settlement": results.get("total_settlement_nfo", 0),
+                            "BFO Realized": results.get("total_realized_bfo", 0),
+                            "BFO Settlement": results.get("total_settlement_bfo", 0),
+                            "Total Realized": results.get("overall_realized", 0),
+                            "Total Settlement": results.get("overall_settlement", 0),
+                            "Grand Total": results.get("grand_total", 0)
                         })
 
+                    # Build DataFrame
                     summary_df = pd.DataFrame(summary_rows)
                     st.dataframe(summary_df)
 
-                    # EXCEL DOWNLOAD
+                    # ====== EXCEL DOWNLOAD ======
                     output = BytesIO()
                     filename = f"A19_Realized&settlement_PNL_{datetime.now().strftime('%Y%m%d')}.xlsx"
 
@@ -560,12 +587,12 @@ def run():
                         summary_df.to_excel(writer, index=False, sheet_name='Summary')
 
                     b64 = base64.b64encode(output.getvalue()).decode()
-                    link = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">📥 Download All Users Summary Excel</a>'
-                    st.markdown(link, unsafe_allow_html=True)
+                    download_link = (
+                        f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" '
+                        f'download="{filename}">📥 Download All Users Summary Excel</a>'
+                    )
 
-                except Exception as e:
-                    st.error(f"Error creating summary: {e}")
-
+                    st.markdown(download_link, unsafe_allow_html=True)
 
     # ===================== TAB 2: PORTFOLIO ANALYSIS =====================
     with tab2:

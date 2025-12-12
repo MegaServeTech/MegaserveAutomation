@@ -1207,7 +1207,7 @@ def run():
                 with st.spinner("🔄 Processing your data... This may take a moment."):
                     try:
                         # Read uploaded files
-                        df1_r = pd.read_csv(uploaded_usersetting_r, skiprows=6)
+                        df1_r = pd.read_excel(uploaded_usersetting_r)
                         df2_r = pd.read_csv(uploaded_orderbook_r, index_col=False)
 
                         # Get Noren users

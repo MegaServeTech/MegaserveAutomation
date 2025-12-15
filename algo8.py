@@ -1175,8 +1175,8 @@ def run():
             with col1:
                 uploaded_usersetting_r = st.file_uploader(
                     "User Settings CSV", 
-                    type="csv", 
-                    help="VS1 USERSETTING( EVE ).csv - Ensure file <1MB for testing. Expected columns: User ID, Broker.",
+                    type="xlsx", 
+                    help="VS1 USERSETTING( EVE ).xlsx - Ensure file <1MB for testing. Expected columns: User ID, Broker.",
                     key="usersetting_r"
                 )
                 if uploaded_usersetting_r:
@@ -1207,7 +1207,7 @@ def run():
                 with st.spinner("🔄 Processing your data... This may take a moment."):
                     try:
                         # Read uploaded files
-                        df1_r = pd.read_csv(uploaded_usersetting_r)
+                        df1_r = pd.read_excel(uploaded_usersetting_r)
                         df2_r = pd.read_csv(uploaded_orderbook_r, index_col=False)
 
                         # Get Noren users

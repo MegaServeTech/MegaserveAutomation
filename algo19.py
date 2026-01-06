@@ -265,8 +265,15 @@ def run():
             if missing:
                 raise ValueError(f"Missing columns: {missing}")
 
-            mask = df["Exchange"].isin(["NFO", "BFO"])
-            df.loc[mask, "Symbol"] = df.loc[mask, "Symbol"].astype(str).str[-5:] + df.loc[mask, "Symbol"].astype(str).str[-8:-6]
+            df["Symbol"] = (
+                df["Symbol"]
+                .astype(str)
+                .str.upper()
+                .str.replace(" ", "", regex=False)   # remove spaces
+                .str.extract(r'(\d{5}(PE|CE)|((PE|CE)\d{5}))', expand=False)
+                .iloc[:, 0]
+                .str.replace(r'(PE|CE)(\d{5})', r'\2\1', regex=True)
+            )
 
             df_nfo = df[df["Exchange"] == "NFO"].copy()
             df_bfo = df[df["Exchange"] == "BFO"].copy()
@@ -625,4 +632,3 @@ def run():
 if __name__ == "__main__":
     st.write(f"DEBUG: Starting app at {datetime.now()}")
     run()
-
